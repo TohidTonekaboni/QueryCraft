@@ -32,5 +32,28 @@ services:
         condition: service_healthy
     restart: "no"
 
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+      args:
+        WITH_LOCAL_LLM: "0"
+    container_name: querycraft-app
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      SQL_MODEL_DIR: /models
+    volumes:
+      - ./models:/models:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  
+    depends_on:
+      ingestion:
+        condition: service_completed_successfully  # creates tables, seed data and the read-only role
+
 volumes:
   postgres_data:

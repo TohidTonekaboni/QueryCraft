@@ -1,2 +1,9 @@
 langgraph==1.2.*
 langchain-core==1.7.*
+fastapi==0.162.*
+uvicorn==0.54.*
+sqlglot==30.*
+asyncpg==0.32.*
+httpx==0.28.*
+huggingface_hub>=1.0,<3
+python-dotenv==1.2.*

@@ -4,11 +4,15 @@ All nodes are async and return a partial state update. the graph
 wiring in graph.py does not depend on their internals.
 """
 
-import re
+import asyncpg
 
+from app.db import run_select
+from app.language import build_translation_prompt, clean_translation, detect_language, normalize_persian
+from app.relevance import build_relevance_prompt, parse_relevance
+from app.sql.llm import get_chat_model, get_sql_model
+from app.sql.prompt import STOP, build_prompt, extract_sql
+from app.sql.validator import validate_sql
 from app.workflow.state import QueryState
-
-_PERSIAN_CHARS = re.compile(r"[؀-ۿ]")
 
 
 async def input_node(state: QueryState) -> QueryState:
@@ -23,57 +27,51 @@ async def input_node(state: QueryState) -> QueryState:
 
 
 async def language_node(state: QueryState) -> QueryState:
-    """Detect Persian vs. English, preprocess, translate Persian -> English.
-
-    TODO(step 4): replace with a local language detector and translation model.
-    """
+    """Detect Persian vs. English; for Persian, normalise and translate to English with Gemma."""
     question = state["question"]
-    language = "fa" if _PERSIAN_CHARS.search(question) else "en"
-    # STUB: no translation yet, the text is passed through unchanged.
-    return {"language": language, "translated_question": question}
+    language = detect_language(question)
+    if language == "en":
+        return {"language": language, "translated_question": question}
+    persian = normalize_persian(question)
+    translated = clean_translation(await get_chat_model().chat(build_translation_prompt(persian)))
+    # If Gemma returns nothing usable, fall back to the normalised Persian text.
+    return {"language": language, "translated_question": translated or persian}
 
 
 async def relevance_node(state: QueryState) -> QueryState:
-    """Decide whether the question can be answered from the schema.
-
-    TODO(step 5): replace with a local relevance classifier.
-    """
-    # STUB: every non-empty question is considered relevant.
-    return {"is_relevant": bool(state["translated_question"])}
+    """Ask Gemma whether the question can be answered from the schema."""
+    question = state["translated_question"]
+    if not question:
+        return {"is_relevant": False}
+    answer = await get_chat_model().chat(build_relevance_prompt(question))
+    return {"is_relevant": parse_relevance(answer)}
 
 
 async def generate_node(state: QueryState) -> QueryState:
-    """Generate a PostgreSQL query. On retries, state['error'] and the previous
-    state['sql_query'] are available for the correction prompt.
-
-    TODO(step 3): replace with SQLCoder-7B (GGUF) via llama-cpp-python.
-    """
-    # STUB: fixed query.
-    return {
-        "sql_query": "SELECT name, price FROM products ORDER BY price DESC LIMIT 1",
-        "attempts": state.get("attempts", 0) + 1,
-    }
+    """Generate a PostgreSQL query with SQLCoder. On retries the previous SQL and
+    its validation/execution error are included in the prompt."""
+    retry = state.get("attempts", 0) > 0
+    prompt = build_prompt(
+        state["translated_question"],
+        previous_sql=state.get("sql_query") if retry else None,
+        error=state.get("error") if retry else None,
+    )
+    raw = await get_sql_model().complete(prompt, stop=STOP)
+    return {"sql_query": extract_sql(raw), "attempts": state.get("attempts", 0) + 1}
 
 
 async def validate_node(state: QueryState) -> QueryState:
-    """Check the query before it touches the database.
-
-    TODO(step 3): sqlglot validation (single SELECT only, no DDL/DML).
-    """
-    # STUB: accepts anything that starts with SELECT.
-    if state["sql_query"].lstrip().lower().startswith("select"):
-        return {"is_valid": True, "error": None}
-    return {"is_valid": False, "error": "Only SELECT statements are allowed."}
+    """Check the query before it touches the database (single read-only SELECT)."""
+    error = validate_sql(state["sql_query"])
+    return {"is_valid": error is None, "error": error}
 
 
 async def execute_node(state: QueryState) -> QueryState:
-    """Run the query on PostgreSQL.
-
-    TODO(step 3): execute with asyncpg using the read-only role, statement
-    timeout and row limit. On failure return {"error": str(exc)}.
-    """
-    # STUB: no DB access, returns no rows.
-    return {"rows": [], "error": None}
+    """Run the query as the read-only role; errors go back to the correction loop."""
+    try:
+        return {"rows": await run_select(state["sql_query"]), "error": None}
+    except (asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 async def correct_node(state: QueryState) -> QueryState:
@@ -81,8 +79,6 @@ async def correct_node(state: QueryState) -> QueryState:
 
     The error and failing SQL stay in state, so generate_node can include them
     in its correction prompt. The retry cap is enforced by the router.
-
-    TODO(step 5): add error-specific hints to the correction prompt if useful.
     """
     return {}
 
@@ -93,7 +89,10 @@ async def respond_node(state: QueryState) -> QueryState:
         response = {
             "success": False,
             "sql_query": None,
-            "final_answer": "The question is not related to the database.",
+            "final_answer": (
+                "This question cannot be answered from the database. Ask a read-only question "
+                "about products, categories or sales."
+            ),
         }
     elif state.get("error"):
         response = {

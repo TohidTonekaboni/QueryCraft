@@ -8,12 +8,12 @@ Based on the build order in [Project-Description.md](Project-Description.md).
 |---|---|
 | 1. Schema, seed data, Docker Compose with Postgres | Done |
 | 2. LangGraph skeleton with stub nodes | Done |
-| 3. English SQL generation, validation, execution | Not started |
-| 4. Persian detection and translation | Not started |
-| 5. Relevance check and retry loop | Not started |
-| 6. FastAPI endpoint, tests, README | Not started |
+| 3. English SQL generation, validation, execution | Implemented; real model not yet run |
+| 4. Persian detection and translation (Gemma) | Implemented; real model not yet run |
+| 5. Relevance check and retry loop | Implemented; real model not yet run |
+| 6. FastAPI endpoint, tests, README | Done (38 tests pass with fake models) |
 
-Done so far: `postgres:16` with a volume, `.env` secrets, an `ingestion` service, three tables seeded with 1000 products and 5000 order items, a read-only role, and the LangGraph skeleton with stub nodes.
+Remaining: an end-to-end run with the real SQLCoder and Gemma weights (see "Final test checklist" at the bottom).
 
 ## Step 1: finish (done)
 
@@ -47,41 +47,82 @@ Still stubs, replaced in later steps:
 
 ## Step 3: SQL generation, validation, execution (English only)
 
-- [ ] Choose the SQL model. SQLCoder-7B in GGUF Q4/Q5 via `llama-cpp-python`, or an external inference service.
-- [ ] Write the model download/prep script. Weights can't be shipped in the repo.
-- [ ] Make `n_gpu_layers` and the CPU/GPU choice environment variables. Load the model lazily.
-- [ ] Build a schema-aware prompt.
-- [ ] Validate with `sqlglot`: a single `SELECT` only, no DDL/DML.
-- [ ] Execute with `asyncpg` or SQLAlchemy async, using the read-only role, a statement timeout and a row limit.
-- [ ] Run blocking inference in a thread or process pool so the event loop isn't stalled.
+Code is in `app/sql/`, `app/db.py`, `app/config.py`, `app/scripts/`.
 
-## Step 4: Persian support
+- [x] SQL model: SQLCoder-7B-2 GGUF Q4_K_M (`MaziyarPanahi/sqlcoder-7b-2-GGUF`), two backends chosen by `SQL_BACKEND`:
+  - `local`: `llama-cpp-python` in-process (Metal/MPS on macOS, CUDA on NVIDIA builds, CPU with `SQL_N_GPU_LAYERS=0`);
+  - `remote`: OpenAI-compatible `llama-server` on the host. Use this with Docker on macOS, because containers cannot use MPS.
+- [x] `python -m app.scripts.download_model` downloads the weights into `./models` (gitignored, mounted at `/models`).
+- [x] `SQL_N_GPU_LAYERS`, `SQL_N_CTX`, `SQL_MAX_TOKENS`, `SQL_MAX_ROWS` are env vars; the local model loads lazily.
+- [x] Schema-aware SQLCoder prompt (`app/sql/prompt.py`) that includes the previous SQL and error on retries.
+- [x] `sqlglot` validator (`app/sql/validator.py`): one statement, SELECT only, rejects DDL/DML, `SELECT INTO`, `FOR UPDATE`, data-modifying CTEs, and `pg_*` / `lo_*` / `dblink` / `set_config` functions.
+- [x] `asyncpg` execution as `querycraft_ro` in a read-only transaction, with the role's statement timeout and a cursor row limit (`app/db.py`).
+- [x] Blocking inference runs in `asyncio.to_thread` behind a lock.
+- [x] `app` service in `docker-compose.yml` (profile `app`) and `docker-compose.cuda.yml` override.
+- [x] `python -m app.cli "question"` runs the full workflow.
 
-- [ ] Decide the local models for language detection and Persian-to-English translation (the hardest part). Options: a small quantized Qwen or Gemma, or NLLB / Opus-MT.
-- [ ] Document the choices. The spec refers to an architecture document we don't have.
-- [ ] Don't keep several large models on the GPU at once. Load them sequentially.
+Verified: validator cases; full graph in the container and on the host against a fake model server and real Postgres, including a failed query corrected on the second attempt.
 
-## Step 5: relevance check and retry loop
+Not verified yet:
+- [ ] Real SQLCoder output (download ~4 GB, then run `app/scripts/run_llama_server.sh` or use `SQL_BACKEND=local`).
+- [ ] `SQL_BACKEND=local` with `llama-cpp-python` on MPS.
+- [ ] The CUDA image and compose override (no NVIDIA GPU available here).
+- [ ] Prompt quality on JOIN and GROUP BY questions.
 
-- [ ] Add a local relevance classifier. It must reject questions like "What's the weather?".
-- [ ] On execution failure, pass the failing SQL and the Postgres error into the correction prompt. (The loop and state are wired in Step 2; the generator must use them.)
-- [x] Cap retries at 2–3, then return `success: false` with a useful message. (Done in Step 2.)
+How to run it for real (macOS, model on MPS, app in Docker):
+1. `python -m app.scripts.download_model`
+2. `brew install llama.cpp`, then `app/scripts/run_llama_server.sh`
+3. `docker compose --profile app run --rm app python -m app.cli "most expensive product sold"`
 
-## Step 6: API, tests, README
+Keep in mind:
+- `app/sql/prompt.py` holds a hand-copied schema that must stay in sync with `ingestion/schema.sql`.
+- The `app` compose service is behind the `app` profile until Step 6 adds the API.
+- The CUDA image uses Ubuntu 22.04, so it runs Python 3.10 rather than 3.12.
 
-- [ ] Add async FastAPI `POST /query` taking `{"question": "..."}` and returning `success`, `sql_query` and `final_answer` (raw rows).
-- [ ] Add the API as a Docker Compose service.
-- [ ] Pin the dependencies.
-- [ ] Write tests for:
-  - [ ] Persian and English versions of the same question
-  - [ ] A JOIN across all three tables
-  - [ ] An aggregation with GROUP BY
-  - [ ] An irrelevant question
-  - [ ] A malicious or destructive prompt
-  - [ ] A forced SQL error, to prove the correction loop works
-- [ ] Write the README: setup, model download, env vars, CPU/GPU config.
+## Step 4: Persian support (done, in `app/language.py`, `app/workflow/nodes.py`)
+
+- [x] Decision: translation by **Gemma 3 4B instruct** (GGUF Q4_K_M, `ggml-org/gemma-3-4b-it-GGUF`) through llama.cpp, as requested. It runs on CPU by default (`GEMMA_N_GPU_LAYERS=0`), so it never shares GPU memory with SQLCoder.
+- [x] Detection by script (any Persian/Arabic letter, so mixed text counts as Persian).
+- [x] Preprocessing: Arabic `ك ي` to `ک ی`, Persian/Arabic digits to ASCII, diacritics and tatweel removed, half-spaces to spaces, `؟` to `?`.
+- [x] Translation prompt with a schema glossary (محصول=product, دسته‌بندی=category, ...). Falls back to the normalised Persian text if Gemma returns nothing.
+- [x] English questions skip translation. SQLCoder only ever sees English.
+- [x] Backends (`GEMMA_BACKEND=local|remote`), download script (`python -m app.scripts.download_model chat`) and `run_llama_server.sh gemma` (port 8081).
+- [x] The choices are documented in the README.
+
+## Step 5: relevance check and retry loop (done)
+
+- [x] Relevance classifier: Gemma answers YES/NO against the schema. It says NO for general knowledge, chit-chat, weather, and any request to insert, change or delete data. Irrelevant questions exit before SQL generation.
+- [x] On failure, the failing SQL and the Postgres/validation error go into the correction prompt.
+- [x] Retries are capped (`MAX_SQL_ATTEMPTS`, default 3), then `success: false` with the last error.
+
+## Step 6: API, tests, README (done)
+
+- [x] `POST /query` in `app/main.py` (async FastAPI) takes `{"question": "..."}` and returns `success`, `sql_query`, `final_answer` (raw rows). Empty question gives 422. A model or DB outage gives 503 with `success: false`.
+- [x] `app` service in `docker-compose.yml` (port 8000). It starts after `ingestion` finishes, which creates the read-only role. `docker-compose.cuda.yml` is the NVIDIA override.
+- [x] Dependencies pinned in `app/requirements*.txt`.
+- [x] Tests (`tests/`, `python -m pytest`, 38 pass):
+  - [x] Persian and English versions of the same question give the same SQL and rows
+  - [x] A JOIN across all three tables
+  - [x] An aggregation with GROUP BY
+  - [x] An irrelevant question (the SQL model is never called)
+  - [x] A destructive prompt, rejected by relevance, and destructive SQL blocked by the validator (products count unchanged)
+  - [x] A forced SQL error: the correction prompt contains the failing SQL and the Postgres error
+  - [x] Retry cap, model outage (503), empty input, and unit tests for language, relevance, prompts and the validator
+- [x] README: architecture, setup per hardware, env vars, tests.
+
+## Final test checklist (real models)
+
+1. `python -m app.scripts.download_model`
+2. macOS: `app/scripts/run_llama_server.sh sql` and `... gemma` in two terminals, then `docker compose up -d --build`. (CUDA: use `docker-compose.cuda.yml`.)
+3. Try:
+   - `curl -X POST localhost:8000/query -H 'content-type: application/json' -d '{"question":"What is the most expensive product sold?"}'`
+   - The same question in Persian.
+   - "What's the weather?" (should be rejected).
+   - "Delete all products" (should be rejected).
+4. Check: does Gemma's Persian translation use the schema terms? Is SQLCoder's SQL right for JOIN and GROUP BY questions? Does `/v1/chat/completions` on llama-server apply Gemma's chat template correctly?
+5. Not verified here: the CUDA image and compose override (no NVIDIA GPU), `SQL_BACKEND=local` with `llama-cpp-python` on MPS, real model output quality.
 
 ## Open questions
 
-- Which models are expected for detection, translation and relevance?
-- Should `final_answer` stay as raw rows? The spec's sample output suggests yes.
+- Which models does the original architecture document expect for detection, translation and relevance? We chose Gemma for translation and relevance.
+- `final_answer` stays as raw rows, following the spec's sample output.
