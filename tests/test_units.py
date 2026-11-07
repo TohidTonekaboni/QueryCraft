@@ -72,6 +72,14 @@ def test_prompt_schema_is_derived_from_schema_sql():
     assert "revenue = quantity * unit_price" in SCHEMA  # hint comments survive
 
 
+def test_prompt_contains_revenue_hint():
+    from app.sql.prompt import build_prompt
+
+    prompt = build_prompt("total revenue per category")
+    assert "SUM(order_items.quantity * order_items.unit_price)" in prompt
+    assert prompt.index("### Hints") < prompt.index("### Answer")
+
+
 async def test_remote_model_uses_langchain_openai_wrappers():
     import json
     from pathlib import Path

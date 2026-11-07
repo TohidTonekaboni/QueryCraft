@@ -22,6 +22,14 @@ SCHEMA = load_schema()
 
 STOP = ["[/SQL]", "```"]
 
+# Business rules the schema alone does not make obvious; SQLCoder-7B tends to miss them.
+HINTS = """- Revenue, total sales or income = SUM(order_items.quantity * order_items.unit_price). Never SUM(unit_price) alone: always multiply by quantity.
+- Units sold or number of items sold = SUM(order_items.quantity).
+- A product was "sold" only if it has rows in order_items, so JOIN order_items for any question about sold, sales, revenue or orders. Products without sales have no order_items rows.
+- Category names are in categories.name; join through products.category_id.
+- "How many", "number of" and "count" questions need COUNT(...), returning a single number, never a list of rows.
+- Group by the category or product name you select, and use ORDER BY with LIMIT for "top", "most" and "least" questions."""
+
 
 def build_prompt(question: str, previous_sql: str | None = None, error: str | None = None) -> str:
     task = f"Generate a PostgreSQL query to answer [QUESTION]{question}[/QUESTION]"
@@ -36,6 +44,9 @@ def build_prompt(question: str, previous_sql: str | None = None, error: str | No
 ### Database Schema
 The query will run on a database with the following schema:
 {SCHEMA}
+### Hints
+{HINTS}
+
 ### Answer
 Given the database schema, here is the SQL query that answers [QUESTION]{question}[/QUESTION]
 [SQL]
