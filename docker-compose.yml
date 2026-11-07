@@ -50,12 +50,14 @@ services:
     logging: *default-logging
     ports:
       - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9100:9100"  # Prometheus metrics (internal; not part of the public API)
     restart: unless-stopped
     env_file: .env
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       SQL_MODEL_DIR: /models
+      METRICS_ADDR: 0.0.0.0  # inside the container; the port is published on localhost only (above)
     volumes:
       - ./models:/models:ro
     extra_hosts:

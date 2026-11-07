@@ -25,6 +25,7 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app import metrics
 from app.logging_config import error_kind, text_fields
 from app.workflow import nodes
 from app.workflow.state import QueryState
@@ -79,8 +80,14 @@ def _instrument(name: str, fn: NodeFn) -> NodeFn:
         try:
             update = await fn(state)
         except Exception:
+            metrics.NODE_ERRORS.labels(name).inc()
+            metrics.NODE_DURATION.labels(name).observe(time.perf_counter() - start)
             logger.exception("node_failed", extra={"node": name, "duration_ms": _ms(start)})
             raise
+        metrics.NODE_DURATION.labels(name).observe(time.perf_counter() - start)
+        if name == "correct" and state.get("attempts", 0) < state.get("max_attempts", DEFAULT_MAX_ATTEMPTS):
+            # A real retry (not the last attempt): the previous try failed validation or execution.
+            metrics.CORRECTION_LOOPS.labels("validation" if state.get("is_valid") is False else "execution").inc()
         logger.info("node_completed", extra={"node": name, "duration_ms": _ms(start), **_node_fields(update)})
         return update
 
@@ -89,6 +96,23 @@ def _instrument(name: str, fn: NodeFn) -> NodeFn:
 
 def _ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 1)
+
+
+def _record_outcome(final: dict, response: dict, elapsed: float) -> None:
+    """Update the per-question metrics from the finished workflow state."""
+    if response["success"]:
+        outcome = "success"
+        metrics.RESULT_ROWS.observe(len(final["rows"]))
+    elif final.get("is_relevant") is False:
+        outcome = "irrelevant"
+    else:
+        outcome = "failed"
+        # Retries ran out: the last error tells why (validation message or a database error class).
+        metrics.QUERY_FAILURES.labels("execution" if error_kind(final.get("error")) != "validation" else "validation").inc()
+    metrics.QUERIES.labels(outcome, final.get("language", "unknown")).inc()
+    metrics.QUERY_DURATION.labels(outcome).observe(elapsed)
+    if final.get("attempts"):
+        metrics.QUERY_ATTEMPTS.observe(final["attempts"])
 
 
 def build_graph(overrides: dict[str, NodeFn] | None = None) -> CompiledStateGraph:
@@ -127,8 +151,16 @@ async def run_workflow(question: str, graph: CompiledStateGraph | None = None) -
     graph = graph or build_graph()
     start = time.perf_counter()
     logger.info("query_received", extra=text_fields("question", question))
-    final = await graph.ainvoke({"question": question, "max_attempts": DEFAULT_MAX_ATTEMPTS})
+    try:
+        final = await graph.ainvoke({"question": question, "max_attempts": DEFAULT_MAX_ATTEMPTS})
+    except Exception as exc:
+        elapsed = time.perf_counter() - start
+        metrics.QUERIES.labels("error", "unknown").inc()
+        metrics.QUERY_FAILURES.labels(metrics.failure_reason(exc)).inc()
+        metrics.QUERY_DURATION.labels("error").observe(elapsed)
+        raise
     response = final["response"]
+    _record_outcome(final, response, time.perf_counter() - start)
     logger.info("query_completed", extra={
         "success": response["success"], "language": final.get("language"),
         "relevant": final.get("is_relevant"), "attempts": final.get("attempts"),

@@ -6,12 +6,13 @@ wiring in graph.py does not depend on their internals.
 
 import asyncpg
 
+from app import metrics
 from app.db import run_select
 from app.language import build_translation_prompt, clean_translation, detect_language, normalize_persian
 from app.relevance import build_relevance_prompt, parse_relevance
 from app.sql.llm import get_chat_model, get_sql_model
 from app.sql.prompt import STOP, build_prompt, extract_sql
-from app.sql.validator import validate_sql
+from app.sql.validator import check_sql
 from app.workflow.state import QueryState
 
 
@@ -42,9 +43,13 @@ async def relevance_node(state: QueryState) -> QueryState:
     """Ask Gemma whether the question can be answered from the schema."""
     question = state["translated_question"]
     if not question:
+        metrics.RELEVANCE_REJECTIONS.inc()
         return {"is_relevant": False}
     answer = await get_chat_model().chat(build_relevance_prompt(question))
-    return {"is_relevant": parse_relevance(answer)}
+    relevant = parse_relevance(answer)
+    if not relevant:
+        metrics.RELEVANCE_REJECTIONS.inc()
+    return {"is_relevant": relevant}
 
 
 async def generate_node(state: QueryState) -> QueryState:
@@ -62,8 +67,10 @@ async def generate_node(state: QueryState) -> QueryState:
 
 async def validate_node(state: QueryState) -> QueryState:
     """Check the query before it touches the database (single read-only SELECT)."""
-    error = validate_sql(state["sql_query"])
-    return {"is_valid": error is None, "error": error}
+    rejection = check_sql(state["sql_query"])
+    if rejection:
+        metrics.VALIDATION_REJECTIONS.labels(rejection[0]).inc()
+    return {"is_valid": rejection is None, "error": rejection[1] if rejection else None}
 
 
 async def execute_node(state: QueryState) -> QueryState:

@@ -159,6 +159,8 @@ Set `SQL_N_GPU_LAYERS=0` in `.env`, then use either option above.
 | `SQL_N_GPU_LAYERS` / `GEMMA_N_GPU_LAYERS` | Layers offloaded to GPU (`-1` all, `0` CPU). In `local` mode read by the app; with Ollama baked in by `setup_ollama` | `-1` / `0` |
 | `SQL_N_CTX` / `GEMMA_N_CTX` | Context size (same as above) | `4096` / `2048` |
 | `SQL_MODEL_DIR`, `*_MODEL_REPO`, `*_MODEL_FILE` | Where the GGUF weights are and which to download (`local` mode, `llama-server`) | `./models` |
+| `METRICS_PORT` | Port of the Prometheus metrics server; `0` disables it | `9100` |
+| `METRICS_PROBE_INTERVAL` | Seconds between model and database health probes | `30` |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
 | `LOG_FORMAT` | `json` (one object per line, for log collectors) or `text` (readable, for development) | `json` |
 | `LOG_SENSITIVE` | `true` also logs user questions and generated SQL (see Logging) | `false` |
@@ -174,6 +176,43 @@ Logs go to stderr as one JSON object per line (`LOG_FORMAT=text` for a readable 
 
 ```json
 {"timestamp": "2026-11-07T16:14:03.2+00:00", "level": "INFO", "logger": "querycraft.workflow", "message": "node_completed", "request_id": "demo-001", "node": "generate", "duration_ms": 442.1, "attempts": 1, "sql_chars": 50}
+```
+
+## Metrics (Prometheus)
+
+Metrics are served in Prometheus text format on their own port, `http://localhost:9100/metrics` (published on localhost only), so the API itself stays a single `POST /query`. Run a single uvicorn worker (or enable `prometheus_client` multiprocess mode), otherwise each worker exposes its own counters.
+
+### Prometheus and Grafana
+
+`docker-compose-minitoring.yml` adds Prometheus and Grafana. Start it together with the main file so they share a network:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose-minitoring.yml up -d
+```
+
+| | URL | Notes |
+|---|---|---|
+| Grafana | http://localhost:3000 | user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`; the **QueryCraft** dashboard (29 panels) and the Prometheus datasource are provisioned |
+| Prometheus | http://localhost:9090 | scrapes `app:9100` every 15 s; 8 alert rules from `monitoring/alerts.yml` (failure rate, SQL quality, latency, model/database down, validator spikes, statement timeouts, scrape down); 15 days of data |
+
+Both ports are published on localhost only. Files live in `monitoring/` (`prometheus.yml`, `alerts.yml`, `grafana/provisioning/`, `grafana/dashboards/querycraft.json`). To run Prometheus directly on the host instead, change the scrape target in `monitoring/prometheus.yml` to `localhost:9100`. Alert rules only record state here; add Alertmanager to send notifications.
+
+| Group | Metrics (prefix `querycraft_`) |
+|---|---|
+| API | `http_requests_total{method,path,status}`, `http_request_duration_seconds{method,path}`, `http_requests_in_progress` |
+| Questions | `queries_total{outcome,language}` (outcome `success`/`irrelevant`/`failed`/`error`), `query_failures_total{reason}` (`validation`, `execution`, `model_error`, `db_error`, `internal`), `query_attempts`, `query_duration_seconds{outcome}`, `result_rows`, `result_truncated_total` |
+| Workflow | `node_duration_seconds{node}`, `node_errors_total{node}`, `correction_loops_total{trigger}` (`validation`/`execution`) |
+| Models | `model_calls_total{model,kind,status}`, `model_call_duration_seconds{model,kind}`, `model_prompt_chars{model}`, `model_up{model}` |
+| SQL safety | `validation_rejections_total{rule}` (`syntax`, `multi_statement`, `not_select`, `forbidden_table`, `forbidden_node`, `forbidden_function`), `relevance_rejections_total` |
+| Database | `db_query_duration_seconds`, `db_query_errors_total{error_class}`, `db_statement_timeouts_total`, `db_pool_size`, `db_pool_idle`, `db_up` |
+| Build | `build_info{version,sql_model,chat_model,sql_backend}` (set `APP_VERSION`), plus the standard `process_*` and `python_*` metrics |
+
+`model_up` and `db_up` come from a background probe (every `METRICS_PROBE_INTERVAL` seconds), and `model_up` is also updated by every real model call, so an outage shows up even when nobody is asking questions. Label values are always from small fixed sets; questions, SQL and request ids are never used as labels. Useful queries:
+
+```promql
+sum(rate(querycraft_queries_total{outcome=~"failed|error"}[5m])) / sum(rate(querycraft_queries_total[5m]))   # failure ratio
+histogram_quantile(0.95, sum by (le) (rate(querycraft_query_attempts_bucket[15m])))                         # SQL quality: retries needed
+histogram_quantile(0.95, sum by (le, node) (rate(querycraft_node_duration_seconds_bucket[5m])))             # which stage is slow
 ```
 
 ## Tests

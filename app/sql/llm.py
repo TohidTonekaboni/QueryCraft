@@ -19,24 +19,38 @@ from typing import Protocol
 import httpx
 from langchain_core.messages import HumanMessage
 
+from app import metrics
 from app.config import ModelSettings, get_settings
 
 logger = logging.getLogger("querycraft.llm")
+
+
+class ModelServerError(RuntimeError):
+    """The remote model server could not answer (down, timed out, bad response)."""
 
 
 @contextmanager
 def _log_call(cfg: ModelSettings, kind: str, prompt_chars: int) -> Iterator[None]:
     """Log each model call: which model, how long, and whether it failed. Prompts and outputs are never logged."""
     start = time.perf_counter()
-    fields = {"backend": cfg.backend, "kind": kind, "prompt_chars": prompt_chars,
-              "model": cfg.remote_model if cfg.backend == "remote" else cfg.model_path.name}
+    model = cfg.remote_model if cfg.backend == "remote" else cfg.model_path.name
+    fields = {"backend": cfg.backend, "kind": kind, "prompt_chars": prompt_chars, "model": model}
+    metrics.MODEL_PROMPT_CHARS.labels(model).observe(prompt_chars)
     try:
         yield
     except Exception as exc:
+        elapsed = time.perf_counter() - start
+        metrics.MODEL_CALLS.labels(model, kind, "error").inc()
+        metrics.MODEL_DURATION.labels(model, kind).observe(elapsed)
+        metrics.MODEL_UP.labels(model).set(0)
         logger.warning("model_call_failed", extra={
-            **fields, "error_type": type(exc).__name__, "duration_ms": round((time.perf_counter() - start) * 1000, 1)})
+            **fields, "error_type": type(exc).__name__, "duration_ms": round(elapsed * 1000, 1)})
         raise
-    logger.info("model_call", extra={**fields, "duration_ms": round((time.perf_counter() - start) * 1000, 1)})
+    elapsed = time.perf_counter() - start
+    metrics.MODEL_CALLS.labels(model, kind, "ok").inc()
+    metrics.MODEL_DURATION.labels(model, kind).observe(elapsed)
+    metrics.MODEL_UP.labels(model).set(1)
+    logger.info("model_call", extra={**fields, "duration_ms": round(elapsed * 1000, 1)})
 
 
 class TextModel(Protocol):
@@ -144,14 +158,14 @@ class RemoteModel:
             try:
                 return await self._completion_llm().ainvoke(prompt, stop=stop)
             except Exception as exc:
-                raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
+                raise ModelServerError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
 
     async def chat(self, user_message: str) -> str:
         with _log_call(self._cfg, "chat", len(user_message)):
             try:
                 return (await self._chat_llm().ainvoke([HumanMessage(user_message)])).content
             except Exception as exc:
-                raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
+                raise ModelServerError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
 
 
 _models: dict[str, TextModel] = {}

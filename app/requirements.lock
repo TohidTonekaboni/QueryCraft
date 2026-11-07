@@ -36,6 +36,7 @@ opentelemetry-api==1.45.2
 orjson==3.13.0
 ormsgpack==1.13.0
 packaging==26.3
+prometheus_client==0.26.0
 pydantic==2.14.3
 pydantic_core==2.50.4
 python-dotenv==1.2.4

@@ -1,0 +1,62 @@
+# Example alert rules for QueryCraft. Tune thresholds to your traffic.
+groups:
+  - name: querycraft
+    rules:
+      - alert: QueryCraftHighFailureRate
+        expr: |
+          sum(rate(querycraft_queries_total{outcome=~"failed|error"}[5m]))
+            / clamp_min(sum(rate(querycraft_queries_total[5m])), 1e-9) > 0.10
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 10% of questions are failing"
+
+      - alert: QueryCraftSqlQualityDropping
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(querycraft_query_attempts_bucket[15m]))) > 2
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 SQL generation attempts above 2: the model needs retries (prompt or model change?)"
+
+      - alert: QueryCraftSlowQueries
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(querycraft_query_duration_seconds_bucket[10m]))) > 15
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 end-to-end latency above 15 s"
+
+      - alert: QueryCraftModelDown
+        expr: querycraft_model_up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Model {{ $labels.model }} is unreachable or not loaded"
+
+      - alert: QueryCraftDatabaseDown
+        expr: querycraft_db_up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "The database is unreachable"
+
+      - alert: QueryCraftValidationRejectionsSpike
+        expr: sum(rate(querycraft_validation_rejections_total[10m])) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "The SQL validator is rejecting queries often (misbehaving model or probing?)"
+
+      - alert: QueryCraftStatementTimeouts
+        expr: increase(querycraft_db_statement_timeouts_total[15m]) > 3
+        labels: {severity: warning}
+        annotations:
+          summary: "Generated queries keep hitting the database statement timeout"
+
+      - alert: QueryCraftDown
+        expr: up{job="querycraft"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "The metrics endpoint cannot be scraped"

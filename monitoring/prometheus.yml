@@ -1,0 +1,18 @@
+# Prometheus config for QueryCraft.
+#   In Docker (docker-compose-minitoring.yml): the app is reachable as app:9100 on the compose network.
+#   Prometheus running directly on the host:   use localhost:9100 (compose publishes the port on localhost).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: querycraft
+    static_configs:
+      - targets: ["app:9100"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
