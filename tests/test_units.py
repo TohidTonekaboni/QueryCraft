@@ -61,3 +61,64 @@ def test_validator_accepts_selects(sql):
 ])
 def test_validator_rejects(sql):
     assert validate_sql(sql) is not None
+
+
+def test_prompt_schema_is_derived_from_schema_sql():
+    from app.sql.prompt import SCHEMA
+
+    for table in ("categories", "products", "order_items"):
+        assert f"CREATE TABLE {table} (" in SCHEMA
+    assert "IF NOT EXISTS" not in SCHEMA and "CREATE INDEX" not in SCHEMA
+    assert "revenue = quantity * unit_price" in SCHEMA  # hint comments survive
+
+
+async def test_remote_model_uses_langchain_openai_wrappers():
+    import json
+    from pathlib import Path
+
+    import httpx
+
+    from app.config import ModelSettings
+    from app.sql.llm import RemoteModel
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append((request.url.path, body))
+        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        if request.url.path.endswith("/chat/completions"):
+            choice = {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "YES"}}
+            return httpx.Response(200, json={"id": "1", "object": "chat.completion", "created": 0,
+                                             "model": "m", "choices": [choice], "usage": usage})
+        choice = {"index": 0, "finish_reason": "stop", "text": "SELECT 1;"}
+        return httpx.Response(200, json={"id": "1", "object": "text_completion", "created": 0,
+                                         "model": "m", "choices": [choice], "usage": usage})
+
+    cfg = ModelSettings("remote", "http://llm.test", "local", "repo", Path("x"), 0, 2048, 128)
+    model = RemoteModel(cfg)
+    model._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    assert await model.complete("q", stop=["[/SQL]"]) == "SELECT 1;"
+    assert await model.chat("hi") == "YES"
+    (p1, b1), (p2, b2) = seen
+    assert b1["prompt"] == "q"  # a plain string: Ollama rejects a list
+    assert p1 == "/v1/completions" and b1["stop"] == ["[/SQL]"] and b1["max_tokens"] == 128
+    assert p2 == "/v1/chat/completions" and b2["max_tokens"] == 128 and b2["temperature"] == 0.0
+
+
+async def test_remote_model_failure_is_a_runtime_error():
+    from pathlib import Path
+
+    import httpx
+
+    from app.config import ModelSettings
+    from app.sql.llm import RemoteModel
+
+    def handler(request):
+        raise httpx.ConnectError("down")
+
+    model = RemoteModel(ModelSettings("remote", "http://llm.test", "local", "repo", Path("x"), 0, 2048, 128))
+    model._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="llm.test"):
+        await model.chat("hi")

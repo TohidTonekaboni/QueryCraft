@@ -2,3 +2,4 @@
 #   macOS (Metal/MPS): pip install -r app/requirements-local.txt
 #   CUDA:              CMAKE_ARGS="-DGGML_CUDA=on" pip install -r app/requirements-local.txt
 llama-cpp-python>=0.3,<0.4
+langchain-community==0.4.*

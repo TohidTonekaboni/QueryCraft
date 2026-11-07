@@ -1,31 +1,24 @@
 """Schema-aware prompt in the format SQLCoder was trained on."""
 
-# Keep in sync with ingestion/schema.sql.
-SCHEMA = """\
-CREATE TABLE categories (
-  id   SERIAL PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE -- one of: Electronics, Books, Clothing, Home & Kitchen, Sports
-);
+import re
+from pathlib import Path
 
-CREATE TABLE products (
-  id          SERIAL PRIMARY KEY,
-  sku         TEXT NOT NULL UNIQUE,
-  name        TEXT NOT NULL,
-  category_id INTEGER NOT NULL REFERENCES categories(id),
-  price       NUMERIC(10, 2) NOT NULL, -- current list price
-  stock       INTEGER NOT NULL,        -- units in stock
-  created_at  TIMESTAMPTZ NOT NULL
-);
+SCHEMA_FILE = Path(__file__).resolve().parents[2] / "ingestion" / "schema.sql"
 
--- One row per product sold in a sale
-CREATE TABLE order_items (
-  id         SERIAL PRIMARY KEY,
-  product_id INTEGER NOT NULL REFERENCES products(id),
-  quantity   INTEGER NOT NULL,
-  unit_price NUMERIC(10, 2) NOT NULL, -- price at time of sale; revenue = quantity * unit_price
-  sold_at    TIMESTAMPTZ NOT NULL
-);
-"""
+
+def load_schema(path: Path = SCHEMA_FILE) -> str:
+    """Prompt schema derived from ingestion/schema.sql, the single source of truth.
+
+    Keeps the tables and their comments (the comments carry hints for the model);
+    drops the file header, `IF NOT EXISTS` and the index statements."""
+    text = path.read_text()
+    text = text[text.index("CREATE TABLE"):]  # drop the header comment
+    text = re.sub(r"^CREATE INDEX .*\n?", "", text, flags=re.MULTILINE)
+    text = text.replace("IF NOT EXISTS ", "")
+    return text.strip() + "\n"
+
+
+SCHEMA = load_schema()
 
 STOP = ["[/SQL]", "```"]
 

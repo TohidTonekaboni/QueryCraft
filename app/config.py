@@ -14,6 +14,7 @@ load_dotenv()  # no-op for variables already set (e.g. by docker compose)
 class ModelSettings:
     backend: str  # "local" (llama-cpp-python in-process) | "remote" (llama-server)
     remote_url: str
+    remote_model: str  # model name sent to the server ("local" for llama-server; e.g. "gemma3:4b" for Ollama)
     repo: str  # Hugging Face repo of the GGUF file
     model_path: Path
     n_gpu_layers: int  # -1 = offload all layers; 0 = CPU only
@@ -44,6 +45,7 @@ def _model(prefix: str, default_repo: str, default_file: str, default_url: str,
     return ModelSettings(
         backend=backend,
         remote_url=os.getenv(f"{prefix}_REMOTE_URL", default_url).rstrip("/"),
+        remote_model=os.getenv(f"{prefix}_REMOTE_MODEL", "local"),
         repo=os.getenv(f"{prefix}_MODEL_REPO", default_repo),
         model_path=Path(os.getenv("SQL_MODEL_DIR", "./models")) / os.getenv(f"{prefix}_MODEL_FILE", default_file),
         n_gpu_layers=int(os.getenv(f"{prefix}_N_GPU_LAYERS", default_layers)),

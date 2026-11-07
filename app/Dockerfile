@@ -18,11 +18,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /code
 COPY app/requirements.txt app/requirements-local.txt app/
-RUN pip install --no-cache-dir --retries 10 --timeout 60 -r app/requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 60 -r app/requirements.txt --index-url https://pypi.mydigipay.info/simple
 RUN if [ "$WITH_LOCAL_LLM" = "1" ]; then \
-      CMAKE_ARGS="$LLAMA_CMAKE_ARGS" pip install --no-cache-dir -r app/requirements-local.txt; \
+      CMAKE_ARGS="$LLAMA_CMAKE_ARGS" pip install --no-cache-dir -r app/requirements-local.txt --index-url https://pypi.mydigipay.info/simple; \
     fi
 
 COPY app app
+# Single source of truth for the schema shown to the models (read by app/sql/prompt.py).
+COPY ingestion/schema.sql ingestion/schema.sql
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

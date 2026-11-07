@@ -1,10 +1,11 @@
-"""Model backends for SQLCoder (completion) and Gemma (chat).
+"""Model backends for SQLCoder (completion) and Gemma (chat), built on LangChain wrappers.
 
-local  - llama-cpp-python in-process. GPU offload via n_gpu_layers
-         (Metal/MPS on macOS, CUDA on NVIDIA builds, 0 = CPU). Loaded lazily.
-remote - OpenAI-compatible llama.cpp `llama-server`.
+local  - llama.cpp in-process via langchain-community (`LlamaCpp` / `ChatLlamaCpp`). GPU offload via
+         n_gpu_layers (Metal/MPS on macOS, CUDA on NVIDIA builds, 0 = CPU). Loaded lazily.
+remote - OpenAI-compatible llama.cpp `llama-server` via langchain-openai (`OpenAI` / `ChatOpenAI`).
 
-Blocking inference never runs on the event loop.
+The workflow only sees the small `TextModel` protocol, so tests can inject fakes.
+Blocking local inference never runs on the event loop.
 """
 
 import asyncio
@@ -12,6 +13,7 @@ import threading
 from typing import Protocol
 
 import httpx
+from langchain_core.messages import HumanMessage
 
 from app.config import ModelSettings, get_settings
 
@@ -21,65 +23,110 @@ class TextModel(Protocol):
     async def chat(self, user_message: str) -> str: ...
 
 
+def _check_model_file(cfg: ModelSettings) -> None:
+    if not cfg.model_path.exists():
+        raise FileNotFoundError(f"{cfg.model_path} not found; run: python -m app.scripts.download_model")
+
+
 class LocalLlamaModel:
+    """In-process llama.cpp through LangChain. The LangChain object for each call style is built
+    on first use, so only the one a role needs (completion for SQLCoder, chat for Gemma) is loaded."""
+
     def __init__(self, cfg: ModelSettings):
         self._cfg = cfg
         self._llm = None
+        self._chat = None
         self._lock = threading.Lock()  # llama.cpp contexts are not thread-safe
 
-    def _load(self):
-        try:
-            from llama_cpp import Llama
-        except ImportError as exc:
-            raise RuntimeError("backend=local needs llama-cpp-python (pip install -r app/requirements-local.txt)") from exc
-        if not self._cfg.model_path.exists():
-            raise FileNotFoundError(f"{self._cfg.model_path} not found; run: python -m app.scripts.download_model")
-        return Llama(model_path=str(self._cfg.model_path), n_gpu_layers=self._cfg.n_gpu_layers,
-                     n_ctx=self._cfg.n_ctx, verbose=False)
+    def _kwargs(self) -> dict:
+        _check_model_file(self._cfg)
+        return dict(model_path=str(self._cfg.model_path), n_gpu_layers=self._cfg.n_gpu_layers,
+                    n_ctx=self._cfg.n_ctx, max_tokens=self._cfg.max_tokens, temperature=0.0, verbose=False)
 
-    def _run(self, fn_name: str, *args, **kwargs):
+    def _complete(self, prompt: str, stop: list[str] | None) -> str:
         with self._lock:
             if self._llm is None:  # lazy: first request pays the load cost
-                self._llm = self._load()
-            return getattr(self._llm, fn_name)(*args, **kwargs)
+                try:
+                    from langchain_community.llms import LlamaCpp
+                except ImportError as exc:
+                    raise RuntimeError("backend=local needs langchain-community and llama-cpp-python "
+                                       "(pip install -r app/requirements-local.txt)") from exc
+                self._llm = LlamaCpp(**self._kwargs())
+            return self._llm.invoke(prompt, stop=stop)
+
+    def _chat_once(self, user_message: str) -> str:
+        with self._lock:
+            if self._chat is None:
+                try:
+                    from langchain_community.chat_models import ChatLlamaCpp
+                except ImportError as exc:
+                    raise RuntimeError("backend=local needs langchain-community and llama-cpp-python "
+                                       "(pip install -r app/requirements-local.txt)") from exc
+                self._chat = ChatLlamaCpp(**self._kwargs())
+            return self._chat.invoke([HumanMessage(user_message)]).content
 
     async def complete(self, prompt: str, *, stop: list[str] | None = None) -> str:
-        out = await asyncio.to_thread(
-            self._run, "__call__", prompt, max_tokens=self._cfg.max_tokens, temperature=0.0, stop=stop)
-        return out["choices"][0]["text"]
+        return await asyncio.to_thread(self._complete, prompt, stop)
 
     async def chat(self, user_message: str) -> str:
-        out = await asyncio.to_thread(
-            self._run, "create_chat_completion",
-            messages=[{"role": "user", "content": user_message}],
-            max_tokens=self._cfg.max_tokens, temperature=0.0)
-        return out["choices"][0]["message"]["content"]
+        return await asyncio.to_thread(self._chat_once, user_message)
+
+
+class _StringPrompt:
+    """langchain-openai always sends `prompt` as a list; Ollama's /v1/completions only accepts a
+    string. OpenAI and llama-server accept both, so send a single prompt as a plain string."""
+
+    def __init__(self, completions):
+        self._completions = completions
+
+    async def create(self, *, prompt, **kwargs):
+        if isinstance(prompt, list) and len(prompt) == 1:
+            prompt = prompt[0]
+        return await self._completions.create(prompt=prompt, **kwargs)
 
 
 class RemoteModel:
+    """OpenAI-compatible llama-server through langchain-openai."""
+
     def __init__(self, cfg: ModelSettings):
         self._cfg = cfg
+        self._llm = None
+        self._chat = None
         # trust_env=False: inference servers are local/host-side; never route them through a system proxy.
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), trust_env=False)
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), trust_env=False)
 
-    async def _post(self, path: str, body: dict) -> dict:
-        try:
-            resp = await self._client.post(f"{self._cfg.remote_url}{path}", json=body)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
-        return resp.json()
+    def _kwargs(self) -> dict:
+        return dict(base_url=f"{self._cfg.remote_url}/v1", api_key="not-needed", model=self._cfg.remote_model,
+                    temperature=0.0, max_retries=0, http_async_client=self._http)
+
+    def _completion_llm(self):
+        if self._llm is None:
+            from langchain_openai import OpenAI
+            llm = OpenAI(max_tokens=self._cfg.max_tokens, **self._kwargs())
+            llm.async_client = _StringPrompt(llm.async_client)
+            self._llm = llm
+        return self._llm
+
+    def _chat_llm(self):
+        if self._chat is None:
+            from langchain_openai import ChatOpenAI
+            # ChatOpenAI sends `max_completion_tokens`; also send the classic `max_tokens` that every
+            # llama-server version understands.
+            self._chat = ChatOpenAI(max_tokens=self._cfg.max_tokens,
+                                    extra_body={"max_tokens": self._cfg.max_tokens}, **self._kwargs())
+        return self._chat
 
     async def complete(self, prompt: str, *, stop: list[str] | None = None) -> str:
-        data = await self._post("/v1/completions", {
-            "prompt": prompt, "max_tokens": self._cfg.max_tokens, "temperature": 0.0, "stop": stop})
-        return data["choices"][0]["text"]
+        try:
+            return await self._completion_llm().ainvoke(prompt, stop=stop)
+        except Exception as exc:
+            raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
 
     async def chat(self, user_message: str) -> str:
-        data = await self._post("/v1/chat/completions", {
-            "messages": [{"role": "user", "content": user_message}],
-            "max_tokens": self._cfg.max_tokens, "temperature": 0.0})
-        return data["choices"][0]["message"]["content"]
+        try:
+            return (await self._chat_llm().ainvoke([HumanMessage(user_message)])).content
+        except Exception as exc:
+            raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
 
 
 _models: dict[str, TextModel] = {}

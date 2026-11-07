@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS categories (
     id   SERIAL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE
+    name TEXT NOT NULL UNIQUE -- one of: Electronics, Books, Clothing, Home & Kitchen, Sports
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -11,17 +11,17 @@ CREATE TABLE IF NOT EXISTS products (
     sku         TEXT NOT NULL UNIQUE,
     name        TEXT NOT NULL,
     category_id INTEGER NOT NULL REFERENCES categories(id),
-    price       NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
-    stock       INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
+    price       NUMERIC(10, 2) NOT NULL CHECK (price >= 0), -- current list price
+    stock       INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0), -- units in stock
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- One row per product sold in a sale; unit_price is the price at time of sale.
+-- One row per product sold in a sale
 CREATE TABLE IF NOT EXISTS order_items (
     id         SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL REFERENCES products(id),
     quantity   INTEGER NOT NULL CHECK (quantity > 0),
-    unit_price NUMERIC(10, 2) NOT NULL CHECK (unit_price >= 0),
+    unit_price NUMERIC(10, 2) NOT NULL CHECK (unit_price >= 0), -- price at time of sale; revenue = quantity * unit_price
     sold_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
