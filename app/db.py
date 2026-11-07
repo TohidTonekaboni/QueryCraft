@@ -3,12 +3,15 @@
 import asyncio
 import datetime as dt
 import decimal
+import logging
 import uuid
 from typing import Any
 
 import asyncpg
 
 from app.config import get_settings
+
+logger = logging.getLogger("querycraft.db")
 
 _pool: asyncpg.Pool | None = None
 _pool_lock = asyncio.Lock()
@@ -24,6 +27,8 @@ async def get_pool() -> asyncpg.Pool:
                 user=s.db_user, password=s.db_password,
                 min_size=1, max_size=5,
             )
+            logger.info("db_pool_created", extra={"host": s.db_host, "port": s.db_port, "database": s.db_name,
+                                                  "user": s.db_user, "max_size": 5})
         return _pool
 
 
@@ -32,6 +37,7 @@ async def close_pool() -> None:
     if _pool is not None:
         await _pool.close()
         _pool = None
+        logger.info("db_pool_closed")
 
 
 def _jsonable(value: Any) -> Any:

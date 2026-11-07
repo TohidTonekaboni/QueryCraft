@@ -1,7 +1,14 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"   # rotate container logs so they cannot fill the disk
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16
     container_name: querycraft-postgres
+    logging: *default-logging
     restart: unless-stopped
     env_file: .env
     environment:
@@ -23,6 +30,7 @@ services:
       context: ./ingestion
       dockerfile: Dockerfile
     container_name: querycraft-ingestion
+    logging: *default-logging
     env_file: .env
     environment:
       POSTGRES_HOST: postgres 
@@ -39,6 +47,7 @@ services:
       args:
         WITH_LOCAL_LLM: "0"
     container_name: querycraft-app
+    logging: *default-logging
     ports:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped

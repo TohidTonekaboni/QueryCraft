@@ -9,13 +9,34 @@ Blocking local inference never runs on the event loop.
 """
 
 import asyncio
+import logging
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Protocol
 
 import httpx
 from langchain_core.messages import HumanMessage
 
 from app.config import ModelSettings, get_settings
+
+logger = logging.getLogger("querycraft.llm")
+
+
+@contextmanager
+def _log_call(cfg: ModelSettings, kind: str, prompt_chars: int) -> Iterator[None]:
+    """Log each model call: which model, how long, and whether it failed. Prompts and outputs are never logged."""
+    start = time.perf_counter()
+    fields = {"backend": cfg.backend, "kind": kind, "prompt_chars": prompt_chars,
+              "model": cfg.remote_model if cfg.backend == "remote" else cfg.model_path.name}
+    try:
+        yield
+    except Exception as exc:
+        logger.warning("model_call_failed", extra={
+            **fields, "error_type": type(exc).__name__, "duration_ms": round((time.perf_counter() - start) * 1000, 1)})
+        raise
+    logger.info("model_call", extra={**fields, "duration_ms": round((time.perf_counter() - start) * 1000, 1)})
 
 
 class TextModel(Protocol):
@@ -66,10 +87,12 @@ class LocalLlamaModel:
             return self._chat.invoke([HumanMessage(user_message)]).content
 
     async def complete(self, prompt: str, *, stop: list[str] | None = None) -> str:
-        return await asyncio.to_thread(self._complete, prompt, stop)
+        with _log_call(self._cfg, "complete", len(prompt)):
+            return await asyncio.to_thread(self._complete, prompt, stop)
 
     async def chat(self, user_message: str) -> str:
-        return await asyncio.to_thread(self._chat_once, user_message)
+        with _log_call(self._cfg, "chat", len(user_message)):
+            return await asyncio.to_thread(self._chat_once, user_message)
 
 
 class _StringPrompt:
@@ -117,16 +140,18 @@ class RemoteModel:
         return self._chat
 
     async def complete(self, prompt: str, *, stop: list[str] | None = None) -> str:
-        try:
-            return await self._completion_llm().ainvoke(prompt, stop=stop)
-        except Exception as exc:
-            raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
+        with _log_call(self._cfg, "complete", len(prompt)):
+            try:
+                return await self._completion_llm().ainvoke(prompt, stop=stop)
+            except Exception as exc:
+                raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
 
     async def chat(self, user_message: str) -> str:
-        try:
-            return (await self._chat_llm().ainvoke([HumanMessage(user_message)])).content
-        except Exception as exc:
-            raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
+        with _log_call(self._cfg, "chat", len(user_message)):
+            try:
+                return (await self._chat_llm().ainvoke([HumanMessage(user_message)])).content
+            except Exception as exc:
+                raise RuntimeError(f"Model server at {self._cfg.remote_url} failed: {exc!r}") from exc
 
 
 _models: dict[str, TextModel] = {}

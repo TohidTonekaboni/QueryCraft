@@ -159,7 +159,22 @@ Set `SQL_N_GPU_LAYERS=0` in `.env`, then use either option above.
 | `SQL_N_GPU_LAYERS` / `GEMMA_N_GPU_LAYERS` | Layers offloaded to GPU (`-1` all, `0` CPU). In `local` mode read by the app; with Ollama baked in by `setup_ollama` | `-1` / `0` |
 | `SQL_N_CTX` / `GEMMA_N_CTX` | Context size (same as above) | `4096` / `2048` |
 | `SQL_MODEL_DIR`, `*_MODEL_REPO`, `*_MODEL_FILE` | Where the GGUF weights are and which to download (`local` mode, `llama-server`) | `./models` |
+| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
+| `LOG_FORMAT` | `json` (one object per line, for log collectors) or `text` (readable, for development) | `json` |
+| `LOG_SENSITIVE` | `true` also logs user questions and generated SQL (see Logging) | `false` |
 | `HF_ENDPOINT`, `HF_TOKEN` | Optional Hugging Face mirror and token for the download script | |
+
+## Logging
+
+Logs go to stderr as one JSON object per line (`LOG_FORMAT=text` for a readable form), configured in `app/logging_config.py`. Docker rotates them (10 MB x 5 files per service).
+
+- **Request IDs:** every request gets an id (a valid incoming `X-Request-ID` header is reused, anything else is replaced). It is returned in the `X-Request-ID` response header and stamped on every log line, including the workflow, model calls and library logs, so one request can be followed with `docker compose logs app | grep <id>`.
+- **What is logged:** `request` (method, path, status, duration), `query_received`, one `node_completed` per workflow node (duration and what it decided: language, relevance, attempts, row count, validation or SQL error kind), `model_call` (model, duration, prompt size), `query_completed` (success, attempts, failure reason, total duration), `db_pool_created`, `service_started`. Failures log a traceback (`node_failed`, `workflow_failed`, `request_failed`, `model_call_failed`).
+- **Privacy:** passwords and tokens are never logged. User questions, translations, generated SQL and database error text are **not** logged either, only their lengths and the error class, because they can contain personal data. Set `LOG_SENSITIVE=true` to include them while debugging.
+
+```json
+{"timestamp": "2026-11-07T16:14:03.2+00:00", "level": "INFO", "logger": "querycraft.workflow", "message": "node_completed", "request_id": "demo-001", "node": "generate", "duration_ms": 442.1, "attempts": 1, "sql_chars": 50}
+```
 
 ## Tests
 
