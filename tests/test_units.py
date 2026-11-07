@@ -48,6 +48,10 @@ def test_retry_prompt_contains_error_and_previous_sql():
     "SELECT * FROM products",
     "WITH t AS (SELECT 1 a) SELECT * FROM t",
     "SELECT 1 UNION SELECT 2",
+    "SELECT * FROM public.products p JOIN categories c ON c.id = p.category_id",
+    "SELECT c.name, SUM(oi.quantity * oi.unit_price) FROM order_items oi JOIN products p ON p.id = oi.product_id "
+    "JOIN categories c ON c.id = p.category_id GROUP BY c.name ORDER BY 2 DESC LIMIT 3",
+    "SELECT date_trunc('month', sold_at), SUM(quantity) FROM order_items GROUP BY 1",
 ])
 def test_validator_accepts_selects(sql):
     assert validate_sql(sql) is None
@@ -56,6 +60,10 @@ def test_validator_accepts_selects(sql):
 @pytest.mark.parametrize("sql", [
     "DROP TABLE products", "DELETE FROM products", "UPDATE products SET price = 0",
     "SELECT 1; DROP TABLE products", "SELECT * INTO x FROM products", "SELECT pg_sleep(10)",
+    "SELECT * FROM pg_user", "SELECT * FROM information_schema.tables", "SELECT * FROM pg_catalog.pg_tables",
+    "SELECT * FROM products UNION SELECT * FROM pg_user", "SELECT * FROM prodcts",
+    "SELECT version()", "SELECT nextval('products_id_seq')", "SELECT * FROM generate_series(1, 100000000)",
+    "SELECT generate_series(1, 100000000)", "SELECT current_user",
     "SELECT pg_read_file('/etc/passwd')", "SELECT * FROM products FOR UPDATE",
     "WITH d AS (DELETE FROM products RETURNING *) SELECT * FROM d", "SELEC FROM WHERE", "",
 ])

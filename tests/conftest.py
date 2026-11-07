@@ -24,7 +24,8 @@ TRANSLATIONS = {
     normalize_persian("گران‌ترین محصول فروخته شده چیست؟"): "What is the most expensive product sold?",
 }
 
-BAD_SQL = "SELECT name FROM prodcts"  # misspelled table -> Postgres error
+BAD_SQL = "SELECT nme FROM products"  # passes validation, misspelled column -> Postgres error
+UNKNOWN_TABLE_SQL = "SELECT name FROM prodcts"  # rejected by the validator before execution
 JOIN_SQL = (
     "SELECT p.name, p.price FROM order_items oi JOIN products p ON p.id = oi.product_id "
     "JOIN categories c ON c.id = p.category_id ORDER BY p.price DESC LIMIT 1;"
@@ -69,7 +70,7 @@ class FakeSQL:
 
     def __init__(self):
         self.prompts: list[str] = []
-        self.mode = "normal"  # "normal" | "bad_then_good" | "always_bad" | "destructive"
+        self.mode = "normal"  # "normal" | "bad_then_good" | "unknown_table_then_good" | "always_bad" | "destructive"
 
     async def complete(self, prompt: str, *, stop=None) -> str:
         self.prompts.append(prompt)
@@ -79,6 +80,8 @@ class FakeSQL:
             return BAD_SQL
         if self.mode == "bad_then_good":
             return SQL_BY_QUESTION[question] if retry else BAD_SQL
+        if self.mode == "unknown_table_then_good":
+            return SQL_BY_QUESTION[question] if retry else UNKNOWN_TABLE_SQL
         if self.mode == "destructive":
             return "DROP TABLE products;"
         return SQL_BY_QUESTION[question]

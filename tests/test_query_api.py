@@ -83,8 +83,16 @@ async def test_sql_error_triggers_correction_loop(client, fake_sql):
     assert body["success"] is True
     assert len(fake_sql.prompts) == 2
     retry_prompt = fake_sql.prompts[1]
-    assert "prodcts" in retry_prompt  # the failing SQL...
-    assert 'relation "prodcts" does not exist' in retry_prompt  # ...and the Postgres error
+    assert "nme" in retry_prompt  # the failing SQL...
+    assert 'column "nme" does not exist' in retry_prompt  # ...and the Postgres error
+
+
+async def test_validator_error_triggers_correction_loop(client, fake_sql):
+    fake_sql.mode = "unknown_table_then_good"
+    body = await ask(client, EN_QUESTION)
+    assert body["success"] is True
+    assert len(fake_sql.prompts) == 2
+    assert "Table prodcts is not allowed" in fake_sql.prompts[1]  # the validator message reaches the model
 
 
 async def test_retries_are_capped(client, fake_sql):

@@ -1,0 +1,6 @@
+# Exact versions installed from ingestion/requirements.txt (generated from the working image).
+# Used as a pip constraints file. Regenerate: docker compose run --rm --no-deps ingestion pip freeze | sort -f
+psycopg-binary==3.2.13
+psycopg==3.2.13
+python-dotenv==1.0.1
+typing_extensions==4.16.0

@@ -17,10 +17,10 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /code
-COPY app/requirements.txt app/requirements-local.txt app/
-RUN pip install --no-cache-dir --retries 10 --timeout 60 -r app/requirements.txt --index-url https://pypi.mydigipay.info/simple
+COPY app/requirements.txt app/requirements.lock app/requirements-local.txt app/
+RUN pip install --no-cache-dir --retries 10 --timeout 60 -r app/requirements.txt -c app/requirements.lock --index-url https://pypi.mydigipay.info/simple
 RUN if [ "$WITH_LOCAL_LLM" = "1" ]; then \
-      CMAKE_ARGS="$LLAMA_CMAKE_ARGS" pip install --no-cache-dir -r app/requirements-local.txt --index-url https://pypi.mydigipay.info/simple; \
+      CMAKE_ARGS="$LLAMA_CMAKE_ARGS" pip install --no-cache-dir -r app/requirements-local.txt -c app/requirements.lock --index-url https://pypi.mydigipay.info/simple; \
     fi
 
 COPY app app

@@ -30,7 +30,7 @@ input → language → relevance ──no──→ respond
 | language | Detects Persian by script, normalises it (Arabic letters, digits, half-spaces), translates to English with **Gemma** |
 | relevance | **Gemma** answers YES/NO: can this be answered by a read-only SELECT on our schema? |
 | generate | **SQLCoder-7B-2** writes the query; on retries the failing SQL and its error are in the prompt |
-| validate | `sqlglot`: one statement, SELECT only; no DDL/DML, `SELECT INTO`, `FOR UPDATE`, data-modifying CTEs, `pg_*`/`lo_*`/`dblink`/`set_config` functions |
+| validate | `sqlglot`: one statement, SELECT only; **only the app's own tables** (no `pg_*` / `information_schema` / table functions); no DDL/DML, `SELECT INTO`, `FOR UPDATE`, data-modifying CTEs; no `pg_*`/`lo_*`/`dblink`/`set_config`/`version`/`nextval`/`generate_series` functions |
 | execute | `asyncpg` as a **read-only role**, read-only transaction, statement timeout, row limit |
 | correct | Retry (max `MAX_SQL_ATTEMPTS`, default 3), then `success: false` with the last error |
 
@@ -102,13 +102,14 @@ The Ollama SQLCoder model is a community upload of the same v2 weights (Ollama's
 
 ## Setup
 
-1. Edit `.env` (change the passwords).
-2. Get the models. Pick the option for your hardware below. With Ollama (the default) this is two `ollama pull` commands; the GGUF files from Hugging Face are only needed for `local` mode or `llama-server`:
+1. `cp .env.example .env`, then edit it (change the passwords).
+2. Prepare the models. With Ollama (the default) one script pulls the base models and creates the ones the app calls, with the GPU/CPU and context settings from `.env`:
    ```bash
    python -m venv .venv && source .venv/bin/activate
    pip install -r app/requirements.txt
-   python -m app.scripts.download_model          # optional; or: ... sql | chat. Needs access to Hugging Face
+   python -m app.scripts.setup_ollama            # or: ... sql | chat
    ```
+   The GGUF files from Hugging Face (`python -m app.scripts.download_model`) are only needed for `local` mode or `llama-server`.
 3. Start the stack.
 
 ### macOS (Apple Silicon, MPS): models on the host, app in Docker
@@ -116,14 +117,15 @@ The Ollama SQLCoder model is a community upload of the same v2 weights (Ollama's
 Docker containers on macOS cannot use MPS, so the models run on the host in **Ollama** and the container calls its OpenAI-compatible API (`SQL_BACKEND=remote`, `GEMMA_BACKEND=remote`, the defaults). No Hugging Face download is needed.
 
 ```bash
-ollama pull pxlksr/defog_sqlcoder-7b-2:Q4_K_M
-ollama pull gemma3:4b
+python -m app.scripts.setup_ollama     # step 2: pulls the models and creates querycraft-sqlcoder / querycraft-gemma
 docker compose up -d --build
 ```
 
 Ollama must be running (`ollama serve`, or the desktop app).
 
-The model names come from `SQL_REMOTE_MODEL` / `GEMMA_REMOTE_MODEL` in `.env`, and both URLs point at Ollama (`http://host.docker.internal:11434`). To use plain `llama-server` instead (needs the GGUF files from step 2), set the URLs to `:8080` / `:8081`, set `*_REMOTE_MODEL=local`, and run `app/scripts/run_llama_server.sh sql` and `... gemma` in two terminals.
+**GPU/CPU placement.** Ollama's OpenAI-compatible API cannot choose GPU layers per request, so `setup_ollama` bakes `SQL_N_GPU_LAYERS` / `GEMMA_N_GPU_LAYERS` (as `num_gpu`) and `*_N_CTX` (as `num_ctx`) into the derived models. With the defaults SQLCoder runs fully on the GPU and Gemma on the CPU, so two models never share GPU memory; check with `ollama ps`. Re-run `setup_ollama` after changing those variables.
+
+The model names come from `SQL_REMOTE_MODEL` / `GEMMA_REMOTE_MODEL` in `.env` (the derived models), and both URLs point at Ollama (`http://host.docker.internal:11434`). To use plain `llama-server` instead (needs the GGUF files from step 2), set the URLs to `:8080` / `:8081`, set `*_REMOTE_MODEL=local`, and run `app/scripts/run_llama_server.sh sql` and `... gemma` in two terminals.
 
 ### NVIDIA GPU (CUDA): everything in Docker
 
@@ -152,9 +154,10 @@ Set `SQL_N_GPU_LAYERS=0` in `.env`, then use either option above.
 | `MAX_SQL_ATTEMPTS` | SQL generation attempts before giving up | `3` |
 | `SQL_BACKEND` / `GEMMA_BACKEND` | `remote` (Ollama or llama-server) or `local` (llama-cpp-python in-process) | `remote` |
 | `SQL_REMOTE_URL` / `GEMMA_REMOTE_URL` | Ollama or llama-server URLs | `http://host.docker.internal:11434` |
-| `SQL_REMOTE_MODEL` / `GEMMA_REMOTE_MODEL` | Model name sent to the server (`local` for llama-server) | `pxlksr/defog_sqlcoder-7b-2:Q4_K_M` / `gemma3:4b` |
-| `SQL_N_GPU_LAYERS` / `GEMMA_N_GPU_LAYERS` | Layers offloaded to GPU (`-1` all, `0` CPU); `local` mode only. With Ollama, GPU use is managed by Ollama | `-1` / `0` |
-| `SQL_N_CTX` / `GEMMA_N_CTX` | Context size; `local` mode only | `4096` / `2048` |
+| `SQL_REMOTE_MODEL` / `GEMMA_REMOTE_MODEL` | Model name sent to the server (`local` for llama-server); with Ollama, the derived model `setup_ollama` creates | `querycraft-sqlcoder` / `querycraft-gemma` |
+| `SQL_OLLAMA_BASE` / `GEMMA_OLLAMA_BASE` | Ollama model pulled and used as the base of the derived model | `pxlksr/defog_sqlcoder-7b-2:Q4_K_M` / `gemma3:4b` |
+| `SQL_N_GPU_LAYERS` / `GEMMA_N_GPU_LAYERS` | Layers offloaded to GPU (`-1` all, `0` CPU). In `local` mode read by the app; with Ollama baked in by `setup_ollama` | `-1` / `0` |
+| `SQL_N_CTX` / `GEMMA_N_CTX` | Context size (same as above) | `4096` / `2048` |
 | `SQL_MODEL_DIR`, `*_MODEL_REPO`, `*_MODEL_FILE` | Where the GGUF weights are and which to download (`local` mode, `llama-server`) | `./models` |
 | `HF_ENDPOINT`, `HF_TOKEN` | Optional Hugging Face mirror and token for the download script | |
 
@@ -166,12 +169,21 @@ docker compose up -d postgres ingestion    # tests use the real, seeded database
 python -m pytest
 ```
 
-The language models are replaced by deterministic fakes, so no weights or Ollama are needed; the validator, LangGraph workflow, FastAPI app and PostgreSQL are real. The suite covers Persian vs. English, a three-table JOIN, GROUP BY, irrelevant and destructive questions, a forced SQL error with the correction loop, and the retry cap. Tests skip themselves if PostgreSQL is not reachable.
+The default suite replaces the language models with deterministic fakes, so no weights or Ollama are needed; the validator, LangGraph workflow, FastAPI app and PostgreSQL are real. The suite covers Persian vs. English, a three-table JOIN, GROUP BY, irrelevant and destructive questions, a forced SQL error with the correction loop, and the retry cap. Tests skip themselves if PostgreSQL is not reachable.
+
+**Live tests** run the real Gemma and SQLCoder through Ollama (English and Persian questions, a count, a three-table JOIN with aggregation, a sold-products question, and irrelevant/destructive requests). They are opt-in, take about 20 s, and compare the answers with reference SQL run on the same database, not with the model's SQL text:
+
+```bash
+python -m app.scripts.setup_ollama
+python -m pytest -m live
+```
+They skip themselves if Ollama or the models are missing. Use them after changing the prompt, the models or their quantization.
 
 ## Limits and notes
 
 - Only the SQL model may be external per the assignment; both models here are local.
-- The tests do not exercise the real models. Check translation quality and SQL correctness (JOINs, `GROUP BY`) manually against Ollama after setup.
+- Prompt hints improve a 7B model but do not guarantee correct SQL. Run `python -m pytest -m live` after changes to catch regressions.
+- Dependencies are pinned two ways: version ranges in `requirements.txt`, and exact versions in `app/requirements.lock` and `ingestion/requirements.lock`, which the Dockerfiles apply as pip constraints. Regenerate a lock file from a working image with `docker compose exec -T app pip freeze | sort -f` (see the header of each file). `llama-cpp-python` (local mode only) is not locked, because it compiles from source per platform.
 - The Docker image installs Python packages from `https://pypi.mydigipay.info/simple` (see `app/Dockerfile`). Remove `--index-url` there if you build outside that network.
 - Blocking inference runs in a worker thread (`local`) or over HTTP (`remote`), so the event loop is never blocked.
 - The model prompts read their schema from `ingestion/schema.sql` at import time (the app image copies that file), so there is one source of truth. Put hints for the model in SQL comments there.

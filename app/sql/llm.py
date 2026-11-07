@@ -2,7 +2,7 @@
 
 local  - llama.cpp in-process via langchain-community (`LlamaCpp` / `ChatLlamaCpp`). GPU offload via
          n_gpu_layers (Metal/MPS on macOS, CUDA on NVIDIA builds, 0 = CPU). Loaded lazily.
-remote - OpenAI-compatible llama.cpp `llama-server` via langchain-openai (`OpenAI` / `ChatOpenAI`).
+remote - OpenAI-compatible server (Ollama, or llama.cpp `llama-server`) via langchain-openai (`OpenAI` / `ChatOpenAI`).
 
 The workflow only sees the small `TextModel` protocol, so tests can inject fakes.
 Blocking local inference never runs on the event loop.
@@ -25,7 +25,7 @@ class TextModel(Protocol):
 
 def _check_model_file(cfg: ModelSettings) -> None:
     if not cfg.model_path.exists():
-        raise FileNotFoundError(f"{cfg.model_path} not found; run: python -m app.scripts.download_model")
+        raise FileNotFoundError(f"{cfg.model_path} not found; run: python -m app.scripts.download_model (local mode)")
 
 
 class LocalLlamaModel:
@@ -86,7 +86,7 @@ class _StringPrompt:
 
 
 class RemoteModel:
-    """OpenAI-compatible llama-server through langchain-openai."""
+    """OpenAI-compatible server (Ollama or llama-server) through langchain-openai."""
 
     def __init__(self, cfg: ModelSettings):
         self._cfg = cfg
